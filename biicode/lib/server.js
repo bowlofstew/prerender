@@ -15,6 +15,8 @@ var JS_CHECK_TIMEOUT = process.env.JS_CHECK_TIMEOUT || 50;
 
 var JS_TIMEOUT = process.env.JS_TIMEOUT || 10 * 1000;
 
+var NO_JS_EXECUTION_TIMEOUT = process.env.NO_JS_EXECUTION_TIMEOUT || 1000;
+
 var EVALUATE_JAVASCRIPT_CHECK_TIMEOUT = process.env.EVALUATE_JAVASCRIPT_CHECK_TIMEOUT || 50;
 
 var server = exports = module.exports = {};
@@ -187,7 +189,9 @@ server.onResourceRequested = function (requestData, request) {
         (/api.mixpanel.com/gi).test(requestData.url) ||
         (/fonts.googleapis.com/gi).test(requestData.url) ||
         (/stats.g.doubleclick.net/gi).test(requestData.url) ||
-        (/mc.yandex.ru/gi).test(requestData.url)){
+        (/mc.yandex.ru/gi).test(requestData.url) ||
+        (/use.typekit.net/gi).test(requestData.url) ||
+        (/beacon.tapfiliate.com/gi).test(requestData.url)){
 
         request.abort();
     }
@@ -207,7 +211,9 @@ server.onResourceRequestedCallback = function (req, res, request) {
         !(/api.mixpanel.com/gi).test(request.url) &&
         !(/fonts.googleapis.com/gi).test(request.url) &&
         !(/stats.g.doubleclick.net/gi).test(request.url) &&
-        !(/mc.yandex.ru/gi).test(request.url)){
+        !(/mc.yandex.ru/gi).test(request.url) &&
+        !(/use.typekit.net/gi).test(request.url) &&
+        !(/beacon.tapfiliate.com/gi).test(request.url)){
 
         req.prerender.pendingRequests++;
     }
@@ -268,7 +274,7 @@ server.checkIfPageIsDoneLoading = function(req, res, force) {
     // once, and check against a bunch of states that would signal finish - if
     // resource downloads have timed out, if the page has errored out, or if
     // there are no pending requests left
-    if(req.prerender.stage < 1 && (force || (req.prerender.pendingRequests <= 0 && timeSinceLastRequest > (this.options.waitAfterLastRequest || WAIT_AFTER_LAST_REQUEST)) || timedOut)) {
+    if(req.prerender.stage < 1 && (force || (req.prerender.pendingRequests <= 0 && (timeSinceLastRequest > (this.options.waitAfterLastRequest || WAIT_AFTER_LAST_REQUEST))) || timedOut)) {
         req.prerender.stage = 1;
         clearInterval(req.prerender.downloadChecker);
         req.prerender.downloadChecker = null;
@@ -289,14 +295,23 @@ server.checkIfPageIsDoneLoading = function(req, res, force) {
 server.checkIfJavascriptTimedOut = function(req, res) {
 
     var timeout = new Date().getTime() - req.prerender.downloadFinished.getTime() > (this.options.jsTimeout || JS_TIMEOUT);
+    var lastJsExecutionWasLessThanTwoSecondsAgo = req.prerender.lastJavascriptExecution && (new Date().getTime() - req.prerender.lastJavascriptExecution.getTime() < 2000);
+    var noJsExecutionInFirstSecond = !req.prerender.lastJavascriptExecution && (new Date().getTime() - req.prerender.downloadFinished.getTime() > (this.options.noJsExecutionTimeout || NO_JS_EXECUTION_TIMEOUT));
 
-    if (timeout && req.prerender.lastJavascriptExecution && new Date().getTime() - req.prerender.lastJavascriptExecution.getTime() < 2000) {
+    if (!this.phantom || this.phantom.id !== req.prerender.phantomId) {
+        util.log('PhantomJS restarted in the middle of this request. Aborting...');
+        clearInterval(req.prerender.timeoutChecker);
+        req.prerender.timeoutChecker = null;
+
+        res.send(504);
+
+    } else if (timeout && lastJsExecutionWasLessThanTwoSecondsAgo) {
         util.log('Timed out. Sending request with HTML on the page');
         clearInterval(req.prerender.timeoutChecker);
         req.prerender.timeoutChecker = null;
 
         this.onPageEvaluate(req, res);
-    } else if (timeout && req.prerender.stage < 2) {
+    } else if ((timeout && req.prerender.stage < 2) || noJsExecutionInFirstSecond) {
         util.log('Experiencing infinite javascript loop. Killing phantomjs...');
         clearInterval(req.prerender.timeoutChecker);
         req.prerender.timeoutChecker = null;
@@ -435,14 +450,18 @@ server._sendResponse = function(req, res, options) {
     util.log('got', req.prerender.statusCode, 'in', ms + 'ms', 'for', req.prerender.url);
 
     if(options && options.abort) {
-        this.options.worker.kill();
+        this._killPhantomJS();
+    }
+};
+
+server._killPhantomJS = function() {
+    this.options.worker.kill();
        //  try {
        //     //not happy with this... but when phantomjs is hanging, it can't exit any normal way
-       //     util.log('Experiencing infinite javascript loop. Killing phantomjs...');
+       //     util.log('pkilling phantomjs');
        //     require('child_process').spawn('pkill', ['phantomjs']);
-       //     _this.phantom = null;
+       //     this.phantom = null;
        // } catch(e) {
        //     util.log('Error killing phantomjs from javascript infinite loop:', e);
        // }
-    }
-};
+}
